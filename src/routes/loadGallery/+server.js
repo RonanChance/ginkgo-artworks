@@ -14,6 +14,8 @@ export const POST = async ({ request }) => {
             records = await pb.collection('designs').getList(start, end, { sort: '-created', filter: 'demo=false' });
         } else if (filter === 1){
             records = await pb.collection('designs').getList(start, end, { sort: '-created', filter: 'verified=true'});
+        } else if (filter === 3) {
+            records = await pb.collection('sbs_designs').getList(start, end, { sort: '-created' });
         } else {
             records = await pb.collection('designs').getList(start, end, { sort: '-created', filter: 'demo=false' });
         }

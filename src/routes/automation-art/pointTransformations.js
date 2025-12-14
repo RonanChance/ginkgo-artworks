@@ -87,12 +87,12 @@ export function shiftPoints(direction, new_spacing, old_spacing, radius_mm, poin
         let newX = x + dx;
         let newY = y + dy;
 
-        if (grid_style.startsWith("Echo384")) {
-            newX = Math.max(0, Math.min(newX, maxX384));
-            newY = Math.max(0, Math.min(newY, maxY384));
-        }
-        else if (grid_style.startsWith("Echo1536")) {
-            // no boundary box needed; stays numeric
+        if (grid_style.startsWith("Echo384") || grid_style.startsWith("Echo1536")) {
+            const maxX1536 = (48 - 1) * Echo1536XSpacing;
+            const maxY1536 = (32 - 1) * Echo1536YSpacing;
+
+            newX = Math.max(0, Math.min(newX, maxX1536));
+            newY = Math.max(0, Math.min(newY, maxY1536));
         }
         else {
             // radial limit

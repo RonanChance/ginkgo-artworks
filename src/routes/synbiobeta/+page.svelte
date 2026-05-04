@@ -2,17 +2,15 @@
     import { onMount } from 'svelte';
     import { browser } from '$app/environment';
     import PocketBase from 'pocketbase';
-    import CfpsCompositionEmbed from '$lib/components/CfpsCompositionEmbed.svelte';
     import { current_well_colors_import, well_colors } from '$lib/proteins.js';
     import { generateGrid } from '../automation-art/generateGrid.js';
     import {
         PLACE_BOARD_ID,
         PLACE_STATE_COLLECTION,
-        PLACE_WELL_CLAIMS_COLLECTION,
-        PLACE_PLATES
+        PLACE_PLATES,
+        PLACE_PIXELS_SYNBIOBETA_COLLECTION,
+        PLACE_STATE_SYNBIOBETA_COLLECTION
     } from '$lib/place.js';
-
-    let { data = {} } = $props();
 
     const BASE_POINTS = generateGrid('Echo384', 0, 0, '', []);
     const PLATE_WIDTH_MM = 128;
@@ -22,8 +20,9 @@
     const PLATE_SPACING_MM = 5;
     const DRAG_PX = 4;
     const PLACE_COOLDOWN_KEY = 'placeCooldownUntil';
-    const PLACE_COOLDOWN_MS = 20_000;
-    const PLACE_INITIAL_HISTORY_STEP = 7292;
+    const PLACE_COOLDOWN_MS = 5_000;
+    const PLACE_DELETE_ONLY_MODE = false;
+    const SYNBIOBETA_DEFAULT_INVITE_ID = '7og5gcl4t1c1358';
 
     const PLACE_ALLOWED_COLORS = ['sfGFP', 'mRFP1', 'mKO2', 'mTurquoise2', 'mScarlet_I', 'Electra2'];
     const paletteColors = PLACE_ALLOWED_COLORS.filter((name) => current_well_colors_import[name] && well_colors[name]);
@@ -37,8 +36,8 @@
     let author = $state('');
     let username = $state('');
     let inviteId = $state('');
+    let hasExplicitInviteInUrl = $state(false);
     let inviteVerified = $state(false);
-    let inviteCfpsApproved = $state(false);
     let verifyingInvite = $state(false);
     let uploading = $state(false);
     let loadingSnapshot = $state(true);
@@ -51,16 +50,6 @@
     let publishStatusMessage = $state('');
     let publishStatusTone = $state('text-success');
     let contributionRows = $state([]);
-    let claimedWellRows = $state({});
-    let myClaimRows = $state({});
-    let hoveredAssignedWellKey = $state('');
-    let previewClaim = $state(null);
-    let activeWellSelectionSlot = $state(null);
-    let currentCompositionSlot = $state(0);
-    let claimingWellSlot = $state(null);
-    let publishingSelectedCompositions = $state(false);
-    let deletingAssignedWellSlot = $state(null);
-    let clearedClaimSlotVersions = $state({});
 
     let isToastVisible = $state(false);
     let alertMessage = $state('');
@@ -69,7 +58,6 @@
     let boardEl;
     let plateElements = {};
     let realtimeClient = null;
-    let claimsRealtimeClient = null;
 
     let isPainting = false;
     let rightClickErasing = false;
@@ -81,7 +69,6 @@
     let lastKey = null;
     let lastPaintClientX = 0;
     let lastPaintClientY = 0;
-    let shouldLoadInitialHistorySnapshot = true;
 
     function fpbaseUrlFor(protein) {
         return `https://www.fpbase.org/protein/${String(protein).toLowerCase().split('_')[0]}`;
@@ -252,7 +239,7 @@
                 x: parsed.x,
                 y: parsed.y,
                 color: nextColor,
-                action: 'place'
+                action: nextColor ? 'place' : 'erase'
             };
         }
 
@@ -269,94 +256,6 @@
 
     function contributionCountFor(row, color) {
         return Number(row?.colors?.[color]) || 0;
-    }
-
-    function wellLabelFromClaim(claim) {
-        if (claim?.well_label) return String(claim.well_label);
-        if (!Number.isFinite(Number(claim?.x)) || !Number.isFinite(Number(claim?.y))) return '';
-        return echo384WellFromPoint(claim.x, claim.y);
-    }
-
-    function selectedWellLabels() {
-        const labels = {};
-        for (const [slot, claim] of Object.entries(myClaimRows || {})) {
-            labels[Number(slot)] = wellLabelFromClaim(claim);
-        }
-        return labels;
-    }
-
-    function selectedWellClaims() {
-        const claims = {};
-        for (const [slot, claim] of Object.entries(myClaimRows || {})) {
-            claims[Number(slot)] = claim;
-        }
-        return claims;
-    }
-
-    function selectedWellColors() {
-        const colors = {};
-        for (const [slot, claim] of Object.entries(myClaimRows || {})) {
-            const pointKey = String(claim?.point_key || '').trim();
-            const colorName = pointKey ? String(point_colors[pointKey] || '').trim() : '';
-            colors[Number(slot)] = colorName && well_colors[colorName] ? well_colors[colorName] : '';
-        }
-        return colors;
-    }
-
-    function selectedWellProteins() {
-        const proteins = {};
-        for (const [slot, claim] of Object.entries(myClaimRows || {})) {
-            const pointKey = String(claim?.point_key || '').trim();
-            const colorName = pointKey ? String(point_colors[pointKey] || '').trim() : '';
-            proteins[Number(slot)] = colorName || '';
-        }
-        return proteins;
-    }
-
-    function previewClaimLabel() {
-        return wellLabelFromClaim(previewClaim);
-    }
-
-    function previewClaimColor() {
-        const pointKey = String(previewClaim?.point_key || '').trim();
-        const colorName = pointKey ? String(point_colors[pointKey] || '').trim() : '';
-        return colorName && well_colors[colorName] ? well_colors[colorName] : '';
-    }
-
-    function previewClaimProtein() {
-        const pointKey = String(previewClaim?.point_key || '').trim();
-        return pointKey ? String(point_colors[pointKey] || '').trim() : '';
-    }
-
-    function previewClaimUsername() {
-        return String(previewClaim?.username || '').trim();
-    }
-
-    function handleCompositionSlotHover(slot) {
-        const claim = myClaimRows[String(Number(slot))];
-        hoveredAssignedWellKey = String(claim?.point_key || '').trim();
-    }
-
-    function handleCompositionSlotHoverEnd(slot) {
-        const claim = myClaimRows[String(Number(slot))];
-        const pointKey = String(claim?.point_key || '').trim();
-        if (hoveredAssignedWellKey === pointKey) {
-            hoveredAssignedWellKey = '';
-        }
-    }
-
-    function handleCompositionSlotSelect(slot) {
-        const normalizedSlot = Number(slot);
-        if (!Number.isInteger(normalizedSlot) || normalizedSlot < 0 || normalizedSlot > 7) return;
-
-        if (activeWellSelectionSlot === normalizedSlot) {
-            activeWellSelectionSlot = null;
-            return;
-        }
-
-        previewClaim = null;
-        currentCompositionSlot = normalizedSlot;
-        activeWellSelectionSlot = normalizedSlot;
     }
 
     function contributionPercentFor(row, color) {
@@ -382,63 +281,6 @@
         const username = String(value || '').trim();
         if (!/^2026a-/i.test(username)) return '';
         return `https://pages.htgaa.org/${encodeURIComponent(username)}`;
-    }
-
-    function assignedWellRows() {
-        const rowsByUsername = new Map();
-
-        for (const claim of Object.values(claimedWellRows || {})) {
-            const usernameValue = String(claim?.username || '').trim();
-            const pointKey = String(claim?.point_key || '').trim();
-            const wellLabel = wellLabelFromClaim(claim);
-            if (!usernameValue || !pointKey || !wellLabel) continue;
-
-            const existing = rowsByUsername.get(usernameValue) || {
-                username: usernameValue,
-                wells: []
-            };
-
-            const colorName = String(point_colors[pointKey] || '').trim();
-            existing.wells.push({
-                pointKey,
-                label: wellLabel,
-                colorName,
-                colorValue: colorName && well_colors[colorName] ? well_colors[colorName] : ''
-            });
-            rowsByUsername.set(usernameValue, existing);
-        }
-
-        return Array.from(rowsByUsername.values())
-            .map((row) => ({
-                ...row,
-                wells: row.wells.sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true }))
-            }))
-            .sort((a, b) => displayContributionUsername(a.username).localeCompare(displayContributionUsername(b.username), undefined, { sensitivity: 'base' }));
-    }
-
-    function assignedContributorCount() {
-        return assignedWellRows().length;
-    }
-
-    function assignedWellContributionCount() {
-        return assignedWellRows().reduce((sum, row) => sum + row.wells.length, 0);
-    }
-
-    function wellBadgeTextColor(color) {
-        const normalized = String(color || '').trim();
-        const hex = normalized.startsWith('#') ? normalized.slice(1) : normalized;
-        if (!/^[0-9a-f]{6}$/i.test(hex)) return '#111827';
-        const r = Number.parseInt(hex.slice(0, 2), 16);
-        const g = Number.parseInt(hex.slice(2, 4), 16);
-        const b = Number.parseInt(hex.slice(4, 6), 16);
-        const luminance = (0.299 * r) + (0.587 * g) + (0.114 * b);
-        return luminance > 170 ? '#111827' : '#f9fafb';
-    }
-
-    function highlightStyleForKey(key) {
-        const normalizedKey = String(key || '').trim();
-        if (!normalizedKey || hoveredAssignedWellKey !== normalizedKey) return '';
-        return 'box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.95);';
     }
 
     function trophyColorForRank(rankIndex) {
@@ -503,105 +345,9 @@
 
         hoverLabel = `${parsed.plateId} · ${echo384WellFromPoint(parsed.x, parsed.y)}`;
         hoverColor = currentColor;
-        const publishedUsername = !hasLocalOverride && currentColor
+        hoverUsername = !hasLocalOverride && currentColor
             ? String(baseline_point_usernames[normalizedKey] || '').trim()
             : '';
-        const claimUsername = String(claimedWellRows[normalizedKey]?.username || '').trim();
-        hoverUsername = publishedUsername || claimUsername || '';
-    }
-
-    function claimDisplayToneForKey(key) {
-        const normalizedKey = parseQuadrantKey(key)?.normalizedKey;
-        if (!normalizedKey) return null;
-
-        const claim = claimedWellRows[normalizedKey];
-        if (!claim) return null;
-
-        const mine = Object.values(myClaimRows || {}).some((row) => row?.point_key === normalizedKey);
-        return mine ? 'mine' : 'other';
-    }
-
-    function claimInlineStyleForKey(key) {
-        const normalizedKey = parseQuadrantKey(key)?.normalizedKey;
-        if (!normalizedKey || !claimedWellRows[normalizedKey]) return '';
-
-        return [
-            'background-image: linear-gradient(45deg, transparent 42%, rgba(17, 24, 39, 0.9) 42%, rgba(17, 24, 39, 0.9) 58%, transparent 58%), linear-gradient(-45deg, transparent 42%, rgba(17, 24, 39, 0.9) 42%, rgba(17, 24, 39, 0.9) 58%, transparent 58%);',
-            'background-size: 100% 100%;',
-            'background-repeat: no-repeat;'
-        ].join(' ');
-    }
-
-    function isClaimedByAnotherUser(key) {
-        const normalizedKey = parseQuadrantKey(key)?.normalizedKey;
-        if (!normalizedKey) return false;
-        const claim = claimedWellRows[normalizedKey];
-        if (!claim) return false;
-        return !Object.values(myClaimRows || {}).some((row) => row?.point_key === normalizedKey);
-    }
-
-    function claimedEmptyBackgroundForKey() {
-        return 'transparent';
-    }
-
-    function applyClaimRows(claims = [], myClaims = {}) {
-        const nextClaims = {};
-        for (const claim of claims) {
-            const parsed = parseQuadrantKey(claim?.point_key);
-            if (!parsed) continue;
-            nextClaims[parsed.normalizedKey] = {
-                ...claim,
-                point_key: parsed.normalizedKey,
-                reagents: Array.isArray(claim?.reagents) ? claim.reagents : []
-            };
-        }
-
-        const nextMine = {};
-        for (const [slot, claim] of Object.entries(myClaims || {})) {
-            const parsed = parseQuadrantKey(claim?.point_key);
-            if (!parsed) continue;
-            nextMine[String(slot)] = {
-                ...claim,
-                point_key: parsed.normalizedKey,
-                reagents: Array.isArray(claim?.reagents) ? claim.reagents : []
-            };
-        }
-
-        claimedWellRows = nextClaims;
-        myClaimRows = nextMine;
-    }
-
-    function applyRealtimeClaimUpdate(record, action) {
-        const parsed = parseQuadrantKey(record?.point_key);
-        if (!parsed) return;
-
-        const normalizedKey = parsed.normalizedKey;
-        const nextClaims = { ...claimedWellRows };
-        const recordId = String(record?.id || '');
-
-        for (const [existingKey, existingClaim] of Object.entries(nextClaims)) {
-            if (String(existingClaim?.id || '') === recordId) {
-                delete nextClaims[existingKey];
-            }
-        }
-
-        if (action === 'delete') {
-            delete nextClaims[normalizedKey];
-        } else {
-            nextClaims[normalizedKey] = {
-                id: String(record?.id || ''),
-                point_key: normalizedKey,
-                plate_id: String(record?.plate_id || parsed.plateId),
-                x: Number(record?.x),
-                y: Number(record?.y),
-                well_label: String(record?.well_label || echo384WellFromPoint(parsed.x, parsed.y)),
-                claim_slot: Number(record?.claim_slot),
-                username: String(record?.username || '').trim(),
-                reagents: Array.isArray(record?.reagents) ? record.reagents : []
-            };
-        }
-
-        claimedWellRows = nextClaims;
     }
 
     function paintKey(key) {
@@ -609,7 +355,7 @@
         if (!parsed || parsed.normalizedKey === lastKey || isCooldownActive()) return;
         lastKey = parsed.normalizedKey;
         const nextPointColors = { ...baseline_point_colors };
-        const nextColor = current_color;
+        const nextColor = PLACE_DELETE_ONLY_MODE ? null : current_color;
         const baselineColor = baseline_point_colors[parsed.normalizedKey] || null;
 
         if (nextColor === baselineColor) {
@@ -648,32 +394,22 @@
     }
 
     function handlePointerDown(event) {
-        downKey = keyFromClientPoint(event.clientX, event.clientY);
-        updateHover(downKey);
-
-        if (activeWellSelectionSlot == null) {
-            const parsed = parseQuadrantKey(downKey);
-            const normalizedKey = parsed?.normalizedKey || '';
-            const claim = normalizedKey ? claimedWellRows[normalizedKey] : null;
-            const claimedByMe = normalizedKey
-                ? Object.values(myClaimRows || {}).some((row) => row?.point_key === normalizedKey)
-                : false;
-
-            if (claim && !claimedByMe) {
-                previewClaim = claim;
-                currentCompositionSlot = Number.isInteger(Number(claim?.claim_slot))
-                    ? Number(claim.claim_slot)
-                    : 0;
-            } else if (previewClaim) {
-                previewClaim = null;
-            }
+        if (isCooldownActive()) {
             return;
         }
 
+        rightClickErasing = false;
+        restoreColor = null;
+
         isPainting = true;
         didMove = false;
+        lastKey = null;
         downX = event.clientX;
         downY = event.clientY;
+        lastPaintClientX = event.clientX;
+        lastPaintClientY = event.clientY;
+        downKey = keyFromClientPoint(event.clientX, event.clientY);
+        updateHover(downKey);
         boardEl?.setPointerCapture?.(event.pointerId);
     }
 
@@ -688,11 +424,18 @@
             const dy = event.clientY - downY;
             if (dx * dx + dy * dy >= DRAG_PX * DRAG_PX) {
                 didMove = true;
+                paintKey(downKey);
             }
+        }
+
+        if (didMove) {
+            paintSegment(lastPaintClientX, lastPaintClientY, event.clientX, event.clientY);
+            lastPaintClientX = event.clientX;
+            lastPaintClientY = event.clientY;
         }
     }
 
-    async function finishPainting(event) {
+    function finishPainting(event) {
         if (!isPainting) {
             hoverLabel = '';
             hoverColor = '';
@@ -703,12 +446,18 @@
         isPainting = false;
         boardEl?.releasePointerCapture?.(event.pointerId);
 
-        if (!didMove && activeWellSelectionSlot != null) {
-            await claimWellForActiveSlot(downKey);
+        if (!didMove) {
+            toggleKey(downKey);
         }
 
         downKey = null;
         lastKey = null;
+
+        if (rightClickErasing) {
+            current_color = restoreColor || paletteColors[0] || 'sfGFP';
+            rightClickErasing = false;
+            restoreColor = null;
+        }
     }
 
     function applyRealtimePointUpdate(record, action) {
@@ -759,7 +508,7 @@
         realtimeClient = new PocketBase('https://opentrons-art-pb.rcdonovan.com');
 
         try {
-            await realtimeClient.collection(PLACE_STATE_COLLECTION).subscribe('*', (event) => {
+            await realtimeClient.collection(PLACE_STATE_SYNBIOBETA_COLLECTION).subscribe('*', (event) => {
                 const record = event?.record;
                 if (!record || String(record.board_id || '') !== PLACE_BOARD_ID) return;
                 applyRealtimePointUpdate(record, event.action);
@@ -772,30 +521,11 @@
         }
     }
 
-    async function startClaimsRealtimeSubscription() {
-        if (!browser || claimsRealtimeClient) return;
-
-        claimsRealtimeClient = new PocketBase('https://opentrons-art-pb.rcdonovan.com');
-
-        try {
-            await claimsRealtimeClient.collection(PLACE_WELL_CLAIMS_COLLECTION).subscribe('*', (event) => {
-                const record = event?.record;
-                if (!record || String(record.board_id || '') !== PLACE_BOARD_ID) return;
-                applyRealtimeClaimUpdate(record, event.action);
-            }, {
-                filter: `board_id="${PLACE_BOARD_ID}"`,
-                fields: 'id,board_id,point_key,plate_id,x,y,well_label,claim_slot,username,reagents,created,updated'
-            });
-        } catch (error) {
-            console.log('Place claims realtime subscription failed', error);
-        }
-    }
-
     async function stopRealtimeSubscription() {
         if (!realtimeClient) return;
 
         try {
-            await realtimeClient.collection(PLACE_STATE_COLLECTION).unsubscribe('*');
+            await realtimeClient.collection(PLACE_STATE_SYNBIOBETA_COLLECTION).unsubscribe('*');
         } catch (error) {
             console.log('Place realtime unsubscribe failed', error);
         }
@@ -803,23 +533,10 @@
         realtimeClient = null;
     }
 
-    async function stopClaimsRealtimeSubscription() {
-        if (!claimsRealtimeClient) return;
-
-        try {
-            await claimsRealtimeClient.collection(PLACE_WELL_CLAIMS_COLLECTION).unsubscribe('*');
-        } catch (error) {
-            console.log('Place claims realtime unsubscribe failed', error);
-        }
-
-        claimsRealtimeClient = null;
-    }
-
     async function verifyInvite(id = '') {
         const normalizedId = String(id || '').trim();
         inviteId = normalizedId;
         inviteVerified = false;
-        inviteCfpsApproved = false;
         username = '';
         author = '';
 
@@ -839,7 +556,6 @@
 
             if (result?.success && result?.valid) {
                 inviteVerified = true;
-                inviteCfpsApproved = result?.cfps === true;
                 username = String(result.username || '').trim();
                 author = username;
                 inviteId = String(result.inviteId || normalizedId).trim();
@@ -852,7 +568,6 @@
         }
 
         inviteVerified = false;
-        inviteCfpsApproved = false;
         username = '';
         author = '';
         return false;
@@ -860,7 +575,6 @@
 
     async function loadSnapshot() {
         loadingSnapshot = true;
-        const historyStep = shouldLoadInitialHistorySnapshot ? PLACE_INITIAL_HISTORY_STEP : null;
 
         try {
             const response = await fetch('/loadPlace', {
@@ -868,9 +582,8 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     boardId: PLACE_BOARD_ID,
-                    historyStep,
-                    includeFullContributionRows: historyStep != null,
-                    inviteId
+                    pixelsCollection: PLACE_PIXELS_SYNBIOBETA_COLLECTION,
+                    stateCollection: PLACE_STATE_SYNBIOBETA_COLLECTION
                 })
             });
 
@@ -897,10 +610,6 @@
             currentSnapshotId = result.record.id || '';
             currentSnapshotCreated = result.record.created || '';
             contributionRows = Array.isArray(result.record.contribution_rows) ? result.record.contribution_rows : [];
-            applyClaimRows(result.record.claims, result.record.my_claims);
-            if (historyStep) {
-                shouldLoadInitialHistorySnapshot = false;
-            }
         } catch (error) {
             console.log('Quadrant collaborative load error', error);
             showAlert('alert-warning', 'Unable to load the collaborative board.');
@@ -909,200 +618,11 @@
         loadingSnapshot = false;
     }
 
-    function setActiveWellSelectionSlot(slot) {
-        activeWellSelectionSlot = Number.isInteger(Number(slot)) ? Number(slot) : null;
-    }
-
-    async function claimWellForActiveSlot(key) {
-        if (activeWellSelectionSlot == null) return;
-        const parsed = parseQuadrantKey(key);
-        if (!parsed) return;
-
-        if (!inviteId || !inviteVerified || !username) {
-            showAlert('alert-warning', 'Open this page with a valid invite ID before selecting wells.');
-            return;
-        }
-
-        const normalizedKey = parsed.normalizedKey;
-        const existingClaim = claimedWellRows[normalizedKey];
-        const currentSlotClaim = myClaimRows[String(activeWellSelectionSlot)];
-
-        if (existingClaim && currentSlotClaim?.point_key !== normalizedKey) {
-            showAlert('alert-warning', 'That well has already been claimed.');
-            return;
-        }
-
-        claimingWellSlot = activeWellSelectionSlot;
-
-        try {
-            const response = await fetch('/claimPlaceWell', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    boardId: PLACE_BOARD_ID,
-                    inviteId,
-                    claimSlot: activeWellSelectionSlot,
-                    pointKey: normalizedKey,
-                    plateId: parsed.plateId,
-                    x: parsed.x,
-                    y: parsed.y,
-                    wellLabel: echo384WellFromPoint(parsed.x, parsed.y)
-                })
-            });
-
-            const result = await response.json();
-            if (!response.ok || !result?.success) {
-                showAlert('alert-warning', result?.error || 'Unable to claim that well.');
-                return;
-            }
-
-            const claim = result.claim || null;
-            if (claim) {
-                const nextMine = { ...myClaimRows };
-                const previous = nextMine[String(activeWellSelectionSlot)];
-                const nextClaims = { ...claimedWellRows };
-
-                if (previous?.point_key) {
-                    delete nextClaims[previous.point_key];
-                }
-
-                const normalizedClaim = {
-                    ...claim,
-                    point_key: normalizedKey
-                };
-
-                nextMine[String(activeWellSelectionSlot)] = normalizedClaim;
-                nextClaims[normalizedKey] = normalizedClaim;
-                myClaimRows = nextMine;
-                claimedWellRows = nextClaims;
-            }
-
-            currentCompositionSlot = activeWellSelectionSlot;
-            activeWellSelectionSlot = null;
-            previewClaim = null;
-        } catch (error) {
-            console.log('Place claim request failed', error);
-            showAlert('alert-warning', 'Unable to claim that well.');
-        } finally {
-            claimingWellSlot = null;
-        }
-    }
-
-    async function publishSelectedCompositions(submission) {
-        if (!inviteId || !inviteVerified || !username) {
-            showAlert('alert-warning', 'This link is not authorized to publish. Open this page with a valid invite ID.');
-            return;
-        }
-
-        if (!submission || !Array.isArray(submission?.variants) || submission.variants.length === 0) {
-            showAlert('alert-warning', 'Select at least one well before publishing compositions.');
-            return;
-        }
-
-        publishingSelectedCompositions = true;
-
-        try {
-            const response = await fetch('/savePlaceCfps', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    boardId: PLACE_BOARD_ID,
-                    inviteId,
-                    submission
-                })
-            });
-
-            const result = await response.json();
-            if (!response.ok || !result?.success) {
-                showAlert('alert-error', result?.error || 'Unable to publish selected compositions.');
-                return;
-            }
-
-            showAlert('alert-success', 'Published selected well compositions.');
-        } catch (error) {
-            console.log('Place CFPS publish request failed', error);
-            showAlert('alert-error', 'Unable to publish selected compositions.');
-        } finally {
-            publishingSelectedCompositions = false;
-        }
-    }
-
-    async function deleteAssignedWell(slot) {
-        const normalizedSlot = Number(slot);
-        if (!Number.isInteger(normalizedSlot) || normalizedSlot < 0 || normalizedSlot > 7) return;
-
-        const existingClaim = myClaimRows[String(normalizedSlot)];
-        if (!existingClaim) {
-            return;
-        }
-
-        if (!inviteId || !inviteVerified || !username) {
-            showAlert('alert-warning', 'Open this page with a valid invite ID before editing well assignments.');
-            return;
-        }
-
-        deletingAssignedWellSlot = normalizedSlot;
-
-        try {
-            const response = await fetch('/deletePlaceWellClaim', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    boardId: PLACE_BOARD_ID,
-                    inviteId,
-                    claimSlot: normalizedSlot,
-                    claimId: String(existingClaim?.id || '').trim(),
-                    pointKey: String(existingClaim?.point_key || '').trim()
-                })
-            });
-
-            const result = await response.json();
-            if (!response.ok || !result?.success) {
-                showAlert('alert-warning', result?.error || 'Unable to delete well assignment.');
-                return;
-            }
-
-            const deletedIds = new Set((Array.isArray(result?.deleted_claim_ids) ? result.deleted_claim_ids : []).map((value) => String(value || '').trim()).filter(Boolean));
-            const deletedPointKeys = new Set((Array.isArray(result?.deleted_point_keys) ? result.deleted_point_keys : []).map((value) => String(value || '').trim()).filter(Boolean));
-
-            const nextMine = { ...myClaimRows };
-            delete nextMine[String(normalizedSlot)];
-            myClaimRows = nextMine;
-
-            const nextClaims = { ...claimedWellRows };
-            for (const [pointKey, claim] of Object.entries(nextClaims)) {
-                const claimId = String(claim?.id || '').trim();
-                if (deletedIds.has(claimId) || deletedPointKeys.has(String(pointKey || '').trim())) {
-                    delete nextClaims[pointKey];
-                }
-            }
-            claimedWellRows = nextClaims;
-
-            if (previewClaim && (deletedIds.has(String(previewClaim?.id || '').trim()) || Number(previewClaim?.claim_slot) === normalizedSlot)) {
-                previewClaim = null;
-            }
-
-            activeWellSelectionSlot = null;
-            currentCompositionSlot = normalizedSlot;
-            clearedClaimSlotVersions = {
-                ...clearedClaimSlotVersions,
-                [normalizedSlot]: Date.now()
-            };
-
-            showAlert('alert-success', 'Deleted well assignment.');
-        } catch (error) {
-            console.log('Delete place well claim request failed', error);
-            showAlert('alert-warning', 'Unable to delete well assignment.');
-        } finally {
-            deletingAssignedWellSlot = null;
-        }
-    }
-
     async function publishSnapshot() {
         const placement = pendingPlacement();
 
         if (!placement) {
-            showAlert('alert-warning', 'Place exactly one point before publishing.');
+            showAlert('alert-warning', PLACE_DELETE_ONLY_MODE ? 'Remove exactly one point before publishing.' : 'Place exactly one point before publishing.');
             return;
         }
 
@@ -1124,13 +644,14 @@
                 body: JSON.stringify({
                     boardId: PLACE_BOARD_ID,
                     inviteId,
-                    placement
+                    placement,
+                    pixelsCollection: PLACE_PIXELS_SYNBIOBETA_COLLECTION,
+                    stateCollection: PLACE_STATE_SYNBIOBETA_COLLECTION
                 })
             });
 
             const result = await response.json();
-        if (result.success && result.id) {
-                shouldLoadInitialHistorySnapshot = false;
+            if (result.success && result.id) {
                 currentSnapshotId = result.id;
                 if (browser) {
                     const params = new URLSearchParams();
@@ -1177,25 +698,25 @@
         const cooldownInterval = window.setInterval(updateCooldownState, 1000);
         const params = browser ? new URL(window.location.href).searchParams : null;
         const rawId = (params?.get('id') || '').trim();
-        const verifiedFromId = rawId ? await verifyInvite(rawId) : false;
-        if (rawId && !verifiedFromId) {
-            inviteId = rawId;
+        hasExplicitInviteInUrl = Boolean(rawId);
+        const effectiveInviteId = rawId || SYNBIOBETA_DEFAULT_INVITE_ID;
+        const verifiedFromId = effectiveInviteId ? await verifyInvite(effectiveInviteId) : false;
+        if (effectiveInviteId && !verifiedFromId) {
+            inviteId = effectiveInviteId;
         }
 
         await loadSnapshot();
         await startRealtimeSubscription();
-        await startClaimsRealtimeSubscription();
 
         return () => {
             window.clearInterval(cooldownInterval);
             stopRealtimeSubscription();
-            stopClaimsRealtimeSubscription();
         };
     });
 </script>
 
 <svelte:head>
-    <title>1536</title>
+    <title>SynBioBeta</title>
 </svelte:head>
 
 <article class="prose w-full mx-auto mt-5 px-5">
@@ -1204,25 +725,27 @@
     </h2>
 </article>
 
-<div class="w-full max-w-[90vw] sm:max-w-[440px] mx-auto mt-2 mb-2">
-    <div class="flex items-center justify-center gap-2 text-xs opacity-85">
-        <div class="join">
-            <a
-                class="btn btn-xs join-item bg-neutral-700 text-base-content hover:bg-neutral-600"
-                href={`/1536${currentSearchSuffix()}`}
-                aria-current="page"
-            >
-                HTGAA
-            </a>
-            <a
-                class="btn btn-xs join-item bg-base-300 text-base-content/80 hover:bg-neutral-700 hover:text-base-content"
-                href={`/synbiobeta${currentSearchSuffix()}`}
-            >
-                SynBioBeta
-            </a>
+{#if hasExplicitInviteInUrl}
+    <div class="w-full max-w-[90vw] sm:max-w-[440px] mx-auto mt-2 mb-2">
+        <div class="flex items-center justify-center gap-2 text-xs opacity-85">
+            <div class="join">
+                <a
+                    class="btn btn-xs join-item bg-base-300 text-base-content/80 hover:bg-neutral-700 hover:text-base-content"
+                    href={`/1536${currentSearchSuffix()}`}
+                >
+                    HTGAA
+                </a>
+                <a
+                    class="btn btn-xs join-item bg-neutral-700 text-base-content hover:bg-neutral-600"
+                    href={`/synbiobeta${currentSearchSuffix()}`}
+                    aria-current="page"
+                >
+                    SynBioBeta
+                </a>
+            </div>
         </div>
     </div>
-</div>
+{/if}
 
 <div class="relative w-full max-w-[90vw] sm:max-w-[440px] mx-auto pt-0">
     <div class="items-center flex flex-row gap-1 opacity-70 h-4 text-xs whitespace-nowrap">
@@ -1253,7 +776,7 @@
 
     <a
         class="absolute right-1 top-1/2 flex h-4 w-4 -translate-y-1/2 items-center justify-center opacity-60 transition-opacity hover:opacity-100"
-        href={`/1536-history${currentSearchSuffix()}`}
+        href={`/synbiobeta-history${currentSearchSuffix()}`}
         aria-label="View history"
         title="History"
     >
@@ -1268,7 +791,7 @@
         bind:this={boardEl}
         class={`touch-none relative border border-neutral mx-auto w-full max-w-[90vw] sm:max-w-[440px] aspect-[128/86] rounded overflow-hidden ${loadingSnapshot ? 'blur' : ''} ${isCooldownActive() ? 'opacity-80' : ''}`}
         role="application"
-        aria-label="Quadrant collaborative board"
+        aria-label="Quadrant collaborative painting board"
         oncontextmenu={(event) => event.preventDefault()}
         onpointerdown={handlePointerDown}
         onpointermove={handlePointerMove}
@@ -1294,10 +817,8 @@
                                 left: ${platePointLeftPercent(point.x)}%;
                                 top: ${platePointTopPercent(point.y)}%;
                                 transform: translate(-50%, -50%);
-                                background-color: ${pointColorForKey(`${plate.id}|${point.x}, ${point.y}`) || claimedEmptyBackgroundForKey(`${plate.id}|${point.x}, ${point.y}`)};
-                                border: ${claimedWellRows[`${plate.id}|${point.x}, ${point.y}`] ? 'none' : (point_colors[`${plate.id}|${point.x}, ${point.y}`] ? `1px solid ${pointColorForKey(`${plate.id}|${point.x}, ${point.y}`)}` : '1px solid white')};
-                                ${claimInlineStyleForKey(`${plate.id}|${point.x}, ${point.y}`)}
-                                ${highlightStyleForKey(`${plate.id}|${point.x}, ${point.y}`)}
+                                background-color: ${pointColorForKey(`${plate.id}|${point.x}, ${point.y}`)};
+                                border: ${point_colors[`${plate.id}|${point.x}, ${point.y}`] ? `1px solid ${pointColorForKey(`${plate.id}|${point.x}, ${point.y}`)}` : '1px solid white'};
                             `}
                             draggable="false"
                             aria-hidden="true"
@@ -1313,115 +834,111 @@
 </div>
 
 <div class="flex flex-col px-5 gap-1 w-full max-w-[96vw] sm:max-w-[480px] mx-auto mb-[150px]">
-    <CfpsCompositionEmbed
-        data={data?.cfpsData || {}}
-        selectedWellLabels={selectedWellLabels()}
-        selectedWellClaims={selectedWellClaims()}
-        selectedWellColors={selectedWellColors()}
-        selectedWellProteins={selectedWellProteins()}
-        previewClaim={previewClaim}
-        previewLabel={previewClaimLabel()}
-        previewColor={previewClaimColor()}
-        previewProtein={previewClaimProtein()}
-        previewUsername={previewClaimUsername()}
-        locked={!inviteCfpsApproved}
-        deletingAssignment={deletingAssignedWellSlot != null}
-        activeSelectionSlot={activeWellSelectionSlot}
-        currentCompositionSlot={currentCompositionSlot}
-        clearedSlotVersions={clearedClaimSlotVersions}
-        publishDisabled={publishingSelectedCompositions}
-        onSelectionToggle={handleCompositionSlotSelect}
-        onSelectionHover={handleCompositionSlotHover}
-        onSelectionHoverEnd={handleCompositionSlotHoverEnd}
-        onDeleteAssignment={deleteAssignedWell}
-        onPublishSelected={publishSelectedCompositions}
-    />
+    <div class={`min-h-[1.25rem] text-center text-xs ${publishStatusTone}`}>
+        {#if isCooldownActive()}
+            Please wait {formatCooldownRemaining()} to paint again.
+        {:else if publishStatusMessage}
+            {publishStatusMessage}
+        {/if}
+    </div>
 
-    <div class="flex flex-col w-full mt-2 gap-2 mx-auto bg-base-200 rounded px-3 py-3 text-xs opacity-90">
-        <div class="flex items-center justify-between gap-2">
-            <span class="font-semibold text-sm opacity-100">CFPS Contributors</span>
-            <span class="text-[11px] opacity-70">
-                {assignedContributorCount().toLocaleString('en-US')} contributors · {assignedWellContributionCount().toLocaleString('en-US')} contributions
-            </span>
+    <div class="grid grid-cols-2 gap-3 sm:gap-4 items-start">
+        <div class="w-full flex flex-col items-center gap-1">
+            <button class="btn btn-sm w-full max-w-[150px] sm:w-auto rounded gap-1 bg-neutral-700 text-base-content hover:bg-neutral-600 hover:text-base-content" type="button" onclick={publishSnapshot} disabled={uploading || loadingSnapshot || !hasPendingPlacement() || isCooldownActive() || verifyingInvite || !inviteVerified}>
+                {#if uploading}
+                    <span class="loading loading-spinner loading-xs"></span>
+                {:else}
+                    <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 35 35" xmlns="http://www.w3.org/2000/svg"><path d="M29.426 15.535c0 0 0.649-8.743-7.361-9.74-6.865-0.701-8.955 5.679-8.955 5.679s-2.067-1.988-4.872-0.364c-2.511 1.55-2.067 4.388-2.067 4.388s-5.576 1.084-5.576 6.768c0.124 5.677 6.054 5.734 6.054 5.734h9.351v-6h-3l5-5 5 5h-3v6h8.467c0 0 5.52 0.006 6.295-5.395 0.369-5.906-5.336-7.070-5.336-7.070z"></path></svg>
+                {/if}
+                {PLACE_DELETE_ONLY_MODE ? 'Remove Pixel' : 'Submit Pixel'}
+            </button>
+
+            {#if !inviteId && hasPendingPlacement()}
+                <div class="w-full max-w-[170px] text-center text-xs text-warning pt-1">
+                    No user ID in URL. Check your email!
+                </div>
+            {:else if verifyingInvite}
+                <div class="w-full max-w-[170px] text-center text-xs text-info">
+                    Verifying invite link...
+                </div>
+            {:else if !inviteVerified}
+                <!-- <div class="w-full max-w-[170px] text-center text-xs text-warning">
+                    This invite link is not valid for publishing.
+                </div> -->
+            {/if}
         </div>
 
-        {#if assignedContributorCount() === 0}
-            <div class="text-xs opacity-70">No wells assigned yet.</div>
+        {#if PLACE_DELETE_ONLY_MODE}
+            <div class="flex flex-col w-full max-w-[170px] sm:max-w-[170px] gap-2 mx-auto items-center justify-center text-center">
+                <div class="flex flex-row justify-between w-full">
+                    <span class="font-semibold">Mode</span>
+                    <span class="opacity-70">Delete</span>
+                </div>
+                <div class="w-full rounded bg-base-200/80 px-3 py-2 text-xs opacity-80">
+                    Remove pixels until nothing remains. <br />
+                    Thank you to everyone who contributed!
+                </div>
+            </div>
         {:else}
-            <div class="w-full max-h-[25rem] overflow-auto">
-                <table class="table table-xs">
-                    <thead>
-                        <tr>
-                            <th>User</th>
-                            <th>Wells</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {#each assignedWellRows() as row}
-                            <tr>
-                                <td class="font-medium align-top">
-                                    {#if contributionProfileUrl(row.username)}
-                                        <a
-                                            class="block min-w-0 whitespace-normal break-words leading-snug no-underline"
-                                            href={contributionProfileUrl(row.username)}
-                                            target="_blank"
-                                            rel="noopener noreferrer"
-                                        >
-                                            {displayContributionUsername(row.username)}
-                                        </a>
-                                    {:else}
-                                        <span class="block min-w-0 whitespace-normal break-words leading-snug">
-                                            {displayContributionUsername(row.username)}
-                                        </span>
-                                    {/if}
-                                </td>
-                                <td class="align-top">
-                                    <div class="flex flex-wrap gap-1">
-                                        {#each row.wells as well}
-                                            <span
-                                                class="inline-flex min-w-[2.1rem] items-center justify-center rounded-[3px] border px-1.5 py-0.5 text-[10px] leading-none"
-                                                style={well.colorValue
-                                                    ? `background-color: ${well.colorValue}; color: ${wellBadgeTextColor(well.colorValue)}; border-color: ${well.colorValue};`
-                                                    : ''}
-                                                title={well.colorName || well.label}
-                                            >
-                                                {well.label}
-                                            </span>
-                                        {/each}
-                                    </div>
-                                </td>
-                            </tr>
-                        {/each}
-                    </tbody>
-                </table>
+            <div class="flex flex-col w-full max-w-[170px] sm:max-w-[170px] gap-2 mx-auto items-center">
+                <div class="flex flex-row justify-between w-full">
+                    <span class="font-semibold">Protein</span>
+                    <a class="opacity-70 underline" href={fpbaseUrlFor(current_color)} target="_blank" rel="noopener noreferrer">{current_color}</a>
+                </div>
+
+                <div class="grid grid-cols-3 gap-2 justify-items-center content-start w-fit mx-auto">
+                    {#each paletteColors as name}
+                        <div
+                            role="radio"
+                            tabindex="0"
+                            aria-checked={current_color === name}
+                            onclick={() => {
+                                current_color = name;
+                            }}
+                            onkeydown={(event) => event.key === 'Enter' && (current_color = name)}
+                            class="w-[24px] h-[24px] rounded-full cursor-pointer border-[1px] transition outline-none focus:ring-2 ring-offset-2 flex items-center justify-center"
+                            style={`background-color: #fffff; border-color: ${well_colors[name]}; box-shadow: ${current_color === name ? '0 0 0 0px #000 inset' : 'none'};`}
+                            title={name}
+                        >
+                            <div
+                                class="w-[14px] h-[14px] rounded-full block"
+                                style={`background-color: ${current_color === name ? well_colors[name] : 'transparent'};`}
+                            ></div>
+                        </div>
+                    {/each}
+                </div>
             </div>
         {/if}
     </div>
 
-     <div class="flex flex-col w-full mt-3 gap-1 mx-auto bg-base-200 rounded px-3 py-2 text-xs opacity-80">
+    <div class="flex flex-col w-full mt-3 gap-1 mx-auto bg-base-200 rounded px-3 py-2 text-xs opacity-80">
         <span class="font-semibold text-sm opacity-100">Summary</span>
         <span>
-            A real-time, global, collaborative fluorescent protein artwork canvas designed by the <a class="underline" href="https://2026a.htgaa.org" target="_blank" rel="noopener noreferrer">How To Grow (Almost) Anything</a> (HTGAA) community.
+            A real-time, global, collaborative fluorescent protein artwork canvas designed by the <a class="underline" href="https://2026a.htgaa.org" target="_blank" rel="noopener noreferrer">How To Grow (Almost) Anything</a> (HTGAA) and <a class="underline" href="https://www.synbiobeta.com/" target="_blank" rel="noopener noreferrer">SynBioBeta</a> community.
         </span>
         <br />
         <span>
-            HTGAA students and TAs can place one pixel at a time, publish it to the shared artwork, then wait 20 seconds before placing another.
+            {#if PLACE_DELETE_ONLY_MODE}
+                HTGAA students and TAs can remove one pixel at a time from the shared artwork, then wait 5 seconds before removing another.
+            {:else}
+                HTGAA students, TAs, and conference attendees can place one pixel at a time, publish it to the shared artwork, then wait 5 seconds before placing another.
+            {/if}
         </span>
         <br />
         <span>
-            The artwork will be used in a cell-free protein synthesis optimization experiment designed by HTGAA students.
+            The artwork will be deployed on the cloud lab at <a class="underline" href="https://www.ginkgo.bio/" target="_blank" rel="noopener noreferrer">Ginkgo Bioworks</a> to create fluorescent bacteria artwork.
         </span>
         <br />
         <span>
-            Experimental details: <a class="underline" href="https://docs.google.com/presentation/d/1bz0xRXS7tOcje75Xs0dpeOOQpOwgRL1ld1DvPv3yrfU" target="_blank" rel="noopener noreferrer">2026 HTGAA Cloud Lab Recitation</a>
-            <br />
+            <!-- Experimental details: <a class="underline" href="https://docs.google.com/presentation/d/1bz0xRXS7tOcje75Xs0dpeOOQpOwgRL1ld1DvPv3yrfU" target="_blank" rel="noopener noreferrer">2026 HTGAA Cloud Lab Recitation</a> -->
+            <!-- <br /> -->
             Inspiration credit: <a class="underline" href="https://en.wikipedia.org/wiki/R/place" target="_blank" rel="noopener noreferrer">r/place</a>
         </span>
     </div>
-    
+
     <div class="flex flex-col w-full mt-2 gap-2 mx-auto bg-base-200 rounded px-3 py-3 text-xs opacity-90">
         <div class="flex items-center justify-between gap-2">
-            <span class="font-semibold text-sm opacity-100">Artwork Contributors</span>
+            <span class="font-semibold text-sm opacity-100">Top Contributors</span>
             <span class="text-[11px] opacity-70">
                 {contributionRows.length.toLocaleString('en-US')} contributors · {contributionRows.reduce((sum, row) => sum + (Number(row?.total) || 0), 0).toLocaleString('en-US')} contributions
             </span>
